@@ -19,6 +19,7 @@ type Store struct {
 	Alerts       []model.Alert
 	Incidents    []*model.Incident
 	Suppressions []model.Suppression
+	Reviews      []model.ReviewEntry
 }
 
 func Open(dir string) (*Store, error) {
@@ -55,6 +56,9 @@ func (s *Store) load() error {
 	if err := read("suppressions.json", &s.Suppressions); err != nil {
 		return fmt.Errorf("load suppressions: %w", err)
 	}
+	if err := read("reviews.json", &s.Reviews); err != nil {
+		return fmt.Errorf("load reviews: %w", err)
+	}
 	return nil
 }
 
@@ -87,6 +91,36 @@ func (s *Store) SaveIncidents() error {
 func (s *Store) AppendSuppression(sup model.Suppression) error {
 	s.Suppressions = append(s.Suppressions, sup)
 	return s.write("suppressions.json", s.Suppressions)
+}
+
+func (s *Store) SaveSuppressions() error {
+	return s.write("suppressions.json", s.Suppressions)
+}
+
+// AppendReview 追加一条影响审查审计记录。
+func (s *Store) AppendReview(r model.ReviewEntry) error {
+	s.Reviews = append(s.Reviews, r)
+	return s.write("reviews.json", s.Reviews)
+}
+
+// FindAlert 按 ID 查找原始告警，找不到返回 nil。
+func (s *Store) FindAlert(id string) *model.Alert {
+	for i := range s.Alerts {
+		if s.Alerts[i].ID == id {
+			return &s.Alerts[i]
+		}
+	}
+	return nil
+}
+
+// FindSuppression 按告警 ID 查找抑制关系，找不到返回 nil。
+func (s *Store) FindSuppression(alertID string) *model.Suppression {
+	for i := range s.Suppressions {
+		if s.Suppressions[i].AlertID == alertID {
+			return &s.Suppressions[i]
+		}
+	}
+	return nil
 }
 
 func (s *Store) ActiveIncident(fingerprint string) *model.Incident {

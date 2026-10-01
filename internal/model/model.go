@@ -62,5 +62,24 @@ type Suppression struct {
 	ChildSource      string    `json:"child_source"`
 	ParentIncidentID string    `json:"parent_incident_id"`
 	ParentSource     string    `json:"parent_source"`
+	RuleVersion      string    `json:"rule_version"` // 做出抑制判断时所用的规则版本，永久保留
+	Status           string    `json:"status"`       // active | lifted | released
+	Reason           string    `json:"reason,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at,omitempty"`
+}
+
+const (
+	SuppressionActive   = "active"   // 抑制生效中
+	SuppressionLifted   = "lifted"   // 分析人员暂时解除，待重判
+	SuppressionReleased = "released" // 依赖边撤销等原因，抑制解除
+)
+
+// ReviewEntry 是依赖图变更影响审查的审计记录。
+type ReviewEntry struct {
+	At          time.Time `json:"at"`
+	Action      string    `json:"action"` // edge_added | edge_removed | lift | rejudge
+	AlertID     string    `json:"alert_id,omitempty"`
+	Detail      string    `json:"detail"`
+	RuleVersion string    `json:"rule_version"`
 }
