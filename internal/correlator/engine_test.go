@@ -98,3 +98,86 @@ func TestSuppressionSurvivesRestart(t *testing.T) {
 		t.Fatalf("after restart: want suppressed, got %s", r.Outcome)
 	}
 }
+
+func TestDuplicateReplayIsIdempotent(t *testing.T) {
+	eng, st := setup(t)
+	eng.Process(fire("1", "db/ping", "db", 1))
+	r, _ := eng.Process(fire("1", "db/ping", "db", 1))
+	if r.Outcome != correlator.OutcomeDuplicate {
+		t.Fatalf("want duplicate, got %s", r.Outcome)
+	}
+	if len(st.Alerts) != 1 || len(st.Notifications) != 1 {
+		t.Fatalf("replay must not duplicate alerts/notifications: %d alerts, %d notifications",
+			len(st.Alerts), len(st.Notifications))
+	}
+}
+
+func TestLateParentAbsorbsChildIncident(t *testing.T) {
+	eng, st := setup(t)
+	if r, _ := eng.Process(fire("1", "app/http", "app", 1, "db")); r.Outcome != correlator.OutcomeOpened {
+		t.Fatalf("child before parent: want opened, got %s", r.Outcome)
+	}
+	if r, _ := eng.Process(fire("2", "db/ping", "db", 1)); r.Outcome != correlator.OutcomeOpened {
+		t.Fatalf("late parent: want opened, got %s", r.Outcome)
+	}
+	child := st.Incidents[0]
+	parent := st.Incidents[1]
+	if child.Status != model.IncidentSuppressed {
+		t.Fatalf("child incident must be suppressed, got %s", child.Status)
+	}
+	if len(parent.SuppressedAlertIDs) != 1 || parent.SuppressedAlertIDs[0] != "1" {
+		t.Fatalf("parent must list absorbed alert, got %v", parent.SuppressedAlertIDs)
+	}
+	sup := st.FindSuppression("1")
+	if sup == nil || sup.Status != model.SuppressionActive || sup.RuleVersion != "v1" {
+		t.Fatalf("suppression must be active with judged rule version, got %+v", sup)
+	}
+}
+
+func TestApplyRulesReleasesWithdrawnEdge(t *testing.T) {
+	eng, st := setup(t)
+	eng.Process(fire("1", "db/ping", "db", 1))
+	eng.Process(fire("2", "app/http", "app", 1, "db"))
+	report, err := eng.ApplyRules(model.RuleSet{Version: "v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report) != 1 {
+		t.Fatalf("want 1 review line, got %v", report)
+	}
+	sup := st.FindSuppression("2")
+	if sup.Status != model.SuppressionReleased || sup.RuleVersion != "v1" {
+		t.Fatalf("want released with original rule version v1, got %+v", sup)
+	}
+}
+
+func TestLiftAndReevaluate(t *testing.T) {
+	eng, st := setup(t)
+	eng.Process(fire("1", "db/ping", "db", 1))
+	eng.Process(fire("2", "app/http", "app", 1, "db"))
+	ev, err := eng.LiftSuppression("2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ev.ParentActive || !ev.EdgeConfirmed || ev.JudgedRuleVersion != "v1" {
+		t.Fatalf("bad evidence: %+v", ev)
+	}
+	if st.FindSuppression("2").Status != model.SuppressionLifted {
+		t.Fatal("suppression must be lifted")
+	}
+	if _, err := eng.LiftSuppression("2"); err == nil {
+		t.Fatal("double lift must fail")
+	}
+	if _, err := eng.Reevaluate(); err != nil {
+		t.Fatal(err)
+	}
+	if st.FindSuppression("2").Status != model.SuppressionActive {
+		t.Fatal("evidence still valid: suppression must be reinstated")
+	}
+	// 边撤回后复判应正式解除。
+	eng.LiftSuppression("2")
+	eng.ApplyRules(model.RuleSet{Version: "v2"})
+	if st.FindSuppression("2").Status != model.SuppressionReleased {
+		t.Fatal("edge withdrawn: suppression must be released")
+	}
+}

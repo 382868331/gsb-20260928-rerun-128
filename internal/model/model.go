@@ -40,8 +40,9 @@ type Incident struct {
 }
 
 const (
-	IncidentActive   = "active"
-	IncidentResolved = "resolved"
+	IncidentActive     = "active"
+	IncidentResolved   = "resolved"
+	IncidentSuppressed = "suppressed" // 父告警迟到后被吸收抑制
 )
 
 // RuleSet 是关联规则集，带版本号；每个事件记录处理它时所用的版本。
@@ -57,10 +58,29 @@ type DependencyEdge struct {
 }
 
 // Suppression 记录一条抑制关系，持久化后重启仍生效。
+// RuleVersion 保留做出抑制判断时所用的规则版本，便于依赖图变更后审查。
 type Suppression struct {
 	AlertID          string    `json:"alert_id"`
 	ChildSource      string    `json:"child_source"`
 	ParentIncidentID string    `json:"parent_incident_id"`
 	ParentSource     string    `json:"parent_source"`
+	RuleVersion      string    `json:"rule_version"`
+	Status           string    `json:"status"` // active | lifted | released
 	CreatedAt        time.Time `json:"created_at"`
+	EndedAt          time.Time `json:"ended_at,omitempty"`
+}
+
+const (
+	SuppressionActive   = "active"
+	SuppressionLifted   = "lifted"   // 分析人员暂时解除，待重新判断
+	SuppressionReleased = "released" // 依赖边撤回或父事件结束，抑制解除
+)
+
+// Notification 是写入本地记录的通知，DedupKey 保证重复重放不产生多份。
+type Notification struct {
+	Kind       string    `json:"kind"`
+	IncidentID string    `json:"incident_id"`
+	Detail     string    `json:"detail"`
+	DedupKey   string    `json:"dedup_key"`
+	At         time.Time `json:"at"`
 }

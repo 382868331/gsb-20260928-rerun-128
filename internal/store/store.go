@@ -15,10 +15,11 @@ import (
 type Store struct {
 	dir string
 
-	Rules        model.RuleSet
-	Alerts       []model.Alert
-	Incidents    []*model.Incident
-	Suppressions []model.Suppression
+	Rules         model.RuleSet
+	Alerts        []model.Alert
+	Incidents     []*model.Incident
+	Suppressions  []model.Suppression
+	Notifications []model.Notification
 }
 
 func Open(dir string) (*Store, error) {
@@ -55,6 +56,9 @@ func (s *Store) load() error {
 	if err := read("suppressions.json", &s.Suppressions); err != nil {
 		return fmt.Errorf("load suppressions: %w", err)
 	}
+	if err := read("notifications.json", &s.Notifications); err != nil {
+		return fmt.Errorf("load notifications: %w", err)
+	}
 	return nil
 }
 
@@ -87,6 +91,45 @@ func (s *Store) SaveIncidents() error {
 func (s *Store) AppendSuppression(sup model.Suppression) error {
 	s.Suppressions = append(s.Suppressions, sup)
 	return s.write("suppressions.json", s.Suppressions)
+}
+
+func (s *Store) SaveSuppressions() error {
+	return s.write("suppressions.json", s.Suppressions)
+}
+
+// AppendNotification 把通知写入本地记录；DedupKey 已存在时跳过，
+// 返回是否真正新增，保证重复重放不产生多份通知。
+func (s *Store) AppendNotification(n model.Notification) (bool, error) {
+	for _, existing := range s.Notifications {
+		if existing.DedupKey == n.DedupKey {
+			return false, nil
+		}
+	}
+	s.Notifications = append(s.Notifications, n)
+	return true, s.write("notifications.json", s.Notifications)
+}
+
+func (s *Store) HasAlert(id string) bool {
+	return s.FindAlert(id) != nil
+}
+
+func (s *Store) FindAlert(id string) *model.Alert {
+	for i := range s.Alerts {
+		if s.Alerts[i].ID == id {
+			return &s.Alerts[i]
+		}
+	}
+	return nil
+}
+
+// FindSuppression 返回指向切片元素的指针，调用方修改后需 SaveSuppressions。
+func (s *Store) FindSuppression(alertID string) *model.Suppression {
+	for i := range s.Suppressions {
+		if s.Suppressions[i].AlertID == alertID {
+			return &s.Suppressions[i]
+		}
+	}
+	return nil
 }
 
 func (s *Store) ActiveIncident(fingerprint string) *model.Incident {
