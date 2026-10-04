@@ -188,12 +188,21 @@ func (s *Store) ExplanationsFor(subjectFP string) []*model.Explanation {
 	return out
 }
 
-// FindExplanation 按 子身份+父源 找解释；同一对身份只保留一条解释，
-// 重复观察不会产生虚假的新原因。
+// FindExplanation 按 子身份+父源 找解释；同一父来源的不同事件由
+// FindExplanationForParent 精确区分，重复观察不会产生虚假的新原因。
 func (s *Store) FindExplanation(subjectFP, parentSource string) *model.Explanation {
+	return s.FindExplanationForParent(subjectFP, parentSource, "")
+}
+
+// FindExplanationForParent 按子身份与具体父事件身份找解释。
+// 同一来源先后发生的多个父事件是独立事件，不能复用旧轮次的解释。
+func (s *Store) FindExplanationForParent(subjectFP, parentSource, parentIncidentID string) *model.Explanation {
 	var withdrawn *model.Explanation
 	for _, x := range s.Explanations {
 		if x.AlertFingerprint != subjectFP || x.ParentSource != parentSource {
+			continue
+		}
+		if parentIncidentID != "" && x.ParentIncidentID != parentIncidentID {
 			continue
 		}
 		if x.Active() {
@@ -207,7 +216,11 @@ func (s *Store) FindExplanation(subjectFP, parentSource string) *model.Explanati
 }
 
 func (s *Store) ActiveExplanation(subjectFP, parentSource string) *model.Explanation {
-	if x := s.FindExplanation(subjectFP, parentSource); x != nil && x.Active() {
+	return s.ActiveExplanationForParent(subjectFP, parentSource, "")
+}
+
+func (s *Store) ActiveExplanationForParent(subjectFP, parentSource, parentIncidentID string) *model.Explanation {
+	if x := s.FindExplanationForParent(subjectFP, parentSource, parentIncidentID); x != nil && x.Active() {
 		return x
 	}
 	return nil
@@ -241,6 +254,16 @@ func (s *Store) ParentIncidentActive(id string) bool {
 func (s *Store) DecisionForFP(fp string) *model.DecisionState {
 	for i := range s.Decisions {
 		if s.Decisions[i].Fingerprint == fp {
+			return &s.Decisions[i]
+		}
+	}
+	return nil
+}
+
+// DecisionForSubject 返回某个被抑制主体（通常是子事件 ID）的决定状态。
+func (s *Store) DecisionForSubject(subjectID string) *model.DecisionState {
+	for i := range s.Decisions {
+		if s.Decisions[i].SubjectID == subjectID {
 			return &s.Decisions[i]
 		}
 	}
