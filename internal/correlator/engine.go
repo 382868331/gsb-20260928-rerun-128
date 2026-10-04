@@ -492,14 +492,21 @@ func (e *Engine) emit(kind, incidentID, detail string) {
 	e.emitBasis(kind, incidentID, detail, "", nil)
 }
 
-// emitBasis 写入一条带当时依据快照的通知，按 (kind,主体,内容) 去重；
-// 已发出的通知事后不改写其依据。
+// emitBasis 写入一条带当时依据快照的通知，按身份（事件 ID + 主体）去重，
+// 绝不按文案判重：不同事件的同类通知各自保留，同一通知重复提交或
+// 存储重开后重放仍只记录一次。已发出的通知事后不改写其依据。
 func (e *Engine) emitBasis(kind, incidentID, detail, subjectID string, bases []model.Basis) {
+	// 面向主体的通知（抑制/恢复）按主体判重：同一主体被多个父事件
+	// 抑制只通知一次；其余通知按 (类型, 事件, 主体) 判重，与文案无关。
+	dedupKey := kind + "|" + incidentID + "|" + subjectID
+	if kind == "alert_suppressed" || kind == "alert_resumed" {
+		dedupKey = kind + "|" + subjectID
+	}
 	n := model.Notification{
 		Kind:       kind,
 		IncidentID: incidentID,
 		Detail:     detail,
-		DedupKey:   kind + "|" + subjectID + "|" + detail,
+		DedupKey:   dedupKey,
 		SubjectID:  subjectID,
 		Basis:      bases,
 		At:         e.now(),
@@ -544,9 +551,10 @@ func (e *Engine) reconcile() error {
 				"parent incident "+x.ParentIncidentID+" resolved",
 				x.RuleVersion, e.now())
 			e.syncSuppressionStatus(x, model.SuppressionReleased)
-			e.emit("explanation_withdrawn", x.ParentIncidentID,
+			e.emitBasis("explanation_withdrawn", x.ParentIncidentID,
 				fmt.Sprintf("cause %s (%s) of %s withdrawn: parent resolved",
-					x.ID, x.ParentSource, x.AlertFingerprint))
+					x.ID, x.ParentSource, x.AlertFingerprint),
+				x.AlertFingerprint, nil)
 		}
 	}
 	if err := e.store.SaveExplanations(); err != nil {
@@ -578,12 +586,37 @@ func (e *Engine) reconcile() error {
 			if inc := e.store.ActiveIncident(fp); inc != nil {
 				incidentID = inc.ID
 			}
+			if incidentID == "" {
+				// 子告警此前被抑制而未独立开活动事件：恢复通知仍关联
+				// 到被抑制的主体本身。
+				incidentID = subjectID
+			}
 			e.emitBasis("alert_resumed", incidentID,
 				fmt.Sprintf("all confirmed causes for %s cleared; notification resumed", subjectID),
-				subjectID, nil)
+				subjectID, e.basesSnapshot(fp))
 		}
 	}
 	return e.store.SaveDecisions()
+}
+
+// basesSnapshot 生成某子身份全部原因解释（含刚撤回的）的依据快照，
+// 供恢复通知保留当时各原因的依据，事后解释再变化也不改写。
+func (e *Engine) basesSnapshot(subjectFP string) []model.Basis {
+	var b []model.Basis
+	for _, x := range e.store.Explanations {
+		if x.AlertFingerprint != subjectFP {
+			continue
+		}
+		alertID := ""
+		if len(x.AlertIDs) > 0 {
+			alertID = x.AlertIDs[0]
+		}
+		b = append(b, model.Basis{
+			ExplanationID: x.ID, AlertID: alertID, ParentSource: x.ParentSource,
+			ParentIncidentID: x.ParentIncidentID, State: x.State, RuleVersion: x.RuleVersion,
+		})
+	}
+	return b
 }
 
 func (e *Engine) syncSuppressionStatus(x *model.Explanation, status string) {
