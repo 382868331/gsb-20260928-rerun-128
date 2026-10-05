@@ -78,13 +78,15 @@ const (
 
 // Notification 是写入本地记录的通知，DedupKey 保证重复重放不产生多份。
 type Notification struct {
-	Kind       string    `json:"kind"`
-	IncidentID string    `json:"incident_id"`
-	Detail     string    `json:"detail"`
-	DedupKey   string    `json:"dedup_key"`
-	Basis      []Basis   `json:"basis,omitempty"`      // 发出该通知时生效的解释依据（快照，事后不改写）
-	SubjectID  string    `json:"subject_id,omitempty"` // 该通知针对的子告警/事件（用于按主体判重）
-	At         time.Time `json:"at"`
+	Kind        string    `json:"kind"`
+	IncidentID  string    `json:"incident_id"`
+	Detail      string    `json:"detail"`
+	DedupKey    string    `json:"dedup_key"`
+	Basis       []Basis   `json:"basis,omitempty"`       // 发出该通知时生效的解释依据（快照，事后不改写）
+	SubjectID   string    `json:"subject_id,omitempty"`  // 生命周期统一主体：子事件 ID（抑制/原因撤回/恢复一致）
+	AlertID     string    `json:"alert_id,omitempty"`    // 触发该通知的原始告警 ID（可查询关联，不作为主体）
+	Fingerprint string    `json:"fingerprint,omitempty"` // 子告警稳定指纹（可查询关联，不作为主体）
+	At          time.Time `json:"at"`
 }
 
 // Basis 是一条通知做出时所依据的单条原因解释的快照。
@@ -104,7 +106,7 @@ type Basis struct {
 type Explanation struct {
 	ID               string        `json:"id"`
 	AlertFingerprint string        `json:"alert_fingerprint"`
-	SubjectID        string        `json:"subject_id"` // 该解释影响的通知主体（子事件 ID 或首条告警 ID）
+	SubjectID        string        `json:"subject_id"` // 该解释影响的通知主体（统一为子事件 ID）
 	AlertIDs         []string      `json:"alert_ids"`  // 支撑该解释的原始观察（重复观察不重复计原因）
 	ChildSource      string        `json:"child_source"`
 	ParentSource     string        `json:"parent_source"`
@@ -174,7 +176,7 @@ func (x *Explanation) RecordScope(reason, detail, ruleVersion string, at time.Ti
 // 保证“最后一条原因消失时才重新通知”且重复重放不重发。
 type DecisionState struct {
 	Fingerprint string `json:"fingerprint"`
-	SubjectID   string `json:"subject_id"`         // 被抑制的子告警 ID
+	SubjectID   string `json:"subject_id"`         // 被抑制的子事件 ID（生命周期统一主体）
 	Session     string `json:"session"`            // 当前抑制轮次（活动 confirmed 父事件集合）
 	Resumed     bool   `json:"resumed"`            // 本轮是否已发出恢复通知，防重发
 	Observed    bool   `json:"observed,omitempty"` // 是否已对该主体做出过通知决定

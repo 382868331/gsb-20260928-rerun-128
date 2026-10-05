@@ -84,6 +84,14 @@ func Run(dir string) (string, error) {
 		rr.Outcome == correlator.OutcomeSuppressed &&
 			len(eng.ViewCauses("app-01/http").Confirmed) == 2 && len(st.Notifications) == nb)
 
+	// 抑制通知主体必须是子事件 ID，并保留原告警 ID 与指纹作为可查询关联。
+	subjectA3 := st.LatestIncident("app-01/http").ID
+	suppNotif := lastNotif(st.Notifications, "alert_suppressed")
+	pass(fmt.Sprintf("抑制通知主体=子事件 %s，告警/指纹可查（%s/%s）",
+		suppNotif.SubjectID, suppNotif.AlertID, suppNotif.Fingerprint),
+		suppNotif.SubjectID == subjectA3 && suppNotif.AlertID == "a3" &&
+			suppNotif.Fingerprint == "app-01/http" && len(suppNotif.Basis) == 2)
+
 	// ---- 阶段B：一个父事件恢复不应重新通知 ----
 	now = at(10)
 	eng.Process(resolve("a4", "db-01", "ping", 1, 10))
@@ -119,6 +127,20 @@ func Run(dir string) (string, error) {
 	v = eng2.ViewCauses("app-01/http")
 	pass("net-01 恢复：app-01 全部已确认原因清空，发出恰好一次恢复通知",
 		!v.Suppressed && countNotif(st2.Notifications, "alert_resumed")-resumeBefore == 1)
+	// 恢复通知与当初的抑制通知是同一主体（子事件 ID），且可追到当时每个原因。
+	resumeNotif := lastNotif(st2.Notifications, "alert_resumed")
+	pass(fmt.Sprintf("恢复通知主体 %s 与抑制通知一致，依据覆盖 %d 个原因",
+		resumeNotif.SubjectID, len(resumeNotif.Basis)),
+		resumeNotif.SubjectID == subjectA3 && resumeNotif.Fingerprint == "app-01/http" &&
+			len(resumeNotif.Basis) == 2 && resumeNotif.AlertID != "")
+	// 两个独立父事件的原因撤回通知分别保留。
+	withdrawnByParent := map[string]bool{}
+	for _, n := range st2.Notifications {
+		if n.Kind == "explanation_withdrawn" && n.Fingerprint == "app-01/http" {
+			withdrawnByParent[n.IncidentID] = true
+		}
+	}
+	pass("两个独立父事件的原因撤回通知分别保留", len(withdrawnByParent) == 2)
 	// 再次重算/重复观察不重复通知。
 	eng2.Process(fire("a3r2", "app-01", "http", 1, 41))
 	pass("重复观察不产生第二次恢复通知", countNotif(st2.Notifications, "alert_resumed")-resumeBefore == 1)
@@ -287,4 +309,14 @@ func countNotif(ns []model.Notification, kind string) int {
 		}
 	}
 	return n
+}
+
+func lastNotif(ns []model.Notification, kind string) model.Notification {
+	var found model.Notification
+	for _, x := range ns {
+		if x.Kind == kind {
+			found = x
+		}
+	}
+	return found
 }
