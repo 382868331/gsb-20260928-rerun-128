@@ -78,13 +78,15 @@ const (
 
 // Notification 是写入本地记录的通知，DedupKey 保证重复重放不产生多份。
 type Notification struct {
-	Kind       string    `json:"kind"`
-	IncidentID string    `json:"incident_id"`
-	Detail     string    `json:"detail"`
-	DedupKey   string    `json:"dedup_key"`
-	Basis      []Basis   `json:"basis,omitempty"`      // 发出该通知时生效的解释依据（快照，事后不改写）
-	SubjectID  string    `json:"subject_id,omitempty"` // 该通知针对的子告警/事件（用于按主体判重）
-	At         time.Time `json:"at"`
+	Kind        string    `json:"kind"`
+	IncidentID  string    `json:"incident_id"`
+	Detail      string    `json:"detail"`
+	DedupKey    string    `json:"dedup_key"`
+	Basis       []Basis   `json:"basis,omitempty"`       // 发出该通知时生效的解释依据（快照，事后不改写）
+	SubjectID   string    `json:"subject_id,omitempty"`  // 生命周期统一主体：子事件 ID（抑制/原因撤回/恢复共用）
+	AlertID     string    `json:"alert_id,omitempty"`    // 关联信息：触发主体的首条原始告警 ID
+	Fingerprint string    `json:"fingerprint,omitempty"` // 关联信息：主体的稳定指纹（source/check）
+	At          time.Time `json:"at"`
 }
 
 // Basis 是一条通知做出时所依据的单条原因解释的快照。

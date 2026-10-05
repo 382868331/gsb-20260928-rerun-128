@@ -123,6 +123,56 @@ func Run(dir string) (string, error) {
 	eng2.Process(fire("a3r2", "app-01", "http", 1, 41))
 	pass("重复观察不产生第二次恢复通知", countNotif(st2.Notifications, "alert_resumed")-resumeBefore == 1)
 
+	// ---- 阶段D2：同一子事件生命周期的主体身份统一 ----
+	// 抑制、两次原因撤回与恢复通知必须共用同一 subject_id（子事件 ID），
+	// 原告警标识与指纹作为关联信息可查询；恢复通知的依据快照能追到每个原因。
+	var childInc1 *model.Incident
+	for _, inc := range st2.Incidents {
+		if inc.Fingerprint == "app-01/http" && inc.Epoch == 1 {
+			childInc1 = inc
+		}
+	}
+	unified := childInc1 != nil
+	withdrawnParents := map[string]bool{}
+	var resumedN *model.Notification
+	suppressedSeen := false
+	for i := range st2.Notifications {
+		n := &st2.Notifications[i]
+		if n.Fingerprint != "app-01/http" {
+			continue
+		}
+		switch n.Kind {
+		case "alert_suppressed", "alert_resumed", "explanation_withdrawn":
+			if childInc1 == nil || n.SubjectID != childInc1.ID || n.AlertID != "a3" {
+				unified = false
+			}
+		}
+		switch n.Kind {
+		case "alert_suppressed":
+			suppressedSeen = true
+		case "explanation_withdrawn":
+			withdrawnParents[n.IncidentID] = true
+		case "alert_resumed":
+			resumedN = n
+		}
+	}
+	basisParents := map[string]bool{}
+	if resumedN != nil {
+		for _, b := range resumedN.Basis {
+			basisParents[b.ParentSource] = true
+		}
+	}
+	pass(fmt.Sprintf("主体身份统一：抑制/撤回/恢复共用 subject_id=%s，原告警与指纹可查",
+		func() string {
+			if childInc1 == nil {
+				return "<missing>"
+			}
+			return childInc1.ID
+		}()),
+		unified && suppressedSeen && len(withdrawnParents) == 2)
+	pass("恢复通知依据快照可追到当时每个原因（db-01 与 net-01）",
+		resumedN != nil && basisParents["db-01"] && basisParents["net-01"])
+
 	// ---- 阶段E：独立告警即使存在可疑原因仍及时通知 ----
 	// db-01 在 epoch2 活动（阶段C 前曾重开 cache，不影响）；这里为 app-02
 	// 提供一个活动父源 db-01（其 epoch2 事件此时仍活动）。
@@ -227,6 +277,49 @@ func Run(dir string) (string, error) {
 	}
 	traceOK := scoped != nil && len(scoped.Scope) == 1 && len(scoped.History) >= 1
 	pass("关联范围收窄被记录且可追溯（scope 与 history 保留）", traceOK)
+
+	// ---- 阶段J：再次发生不复用旧事件的判重身份 ----
+	// net-01 第二轮恢复后，app-01 第二轮主体的恢复通知针对新子事件；
+	// 随后 app-01 第三轮独立开火，开立全新事件，旧主体的通知不被新增。
+	now = at(90)
+	subj1Notifs := 0
+	for _, n := range st2.Notifications {
+		if childInc1 != nil && n.SubjectID == childInc1.ID {
+			subj1Notifs++
+		}
+	}
+	var childInc2 *model.Incident
+	for _, inc := range st2.Incidents {
+		if inc.Fingerprint == "app-01/http" && inc.Epoch == 2 {
+			childInc2 = inc
+		}
+	}
+	eng2.Process(resolve("e3", "net-01", "ping", 2, 90))
+	resumed2 := 0
+	for _, n := range st2.Notifications {
+		if n.Kind == "alert_resumed" && childInc2 != nil && n.SubjectID == childInc2.ID {
+			resumed2++
+		}
+	}
+	pass("第二轮原因的恢复通知针对新子事件主体且恰好一次", childInc2 != nil && resumed2 == 1)
+	rj, _ := eng2.Process(fire("e4", "app-01", "http", 3, 91))
+	var childInc3 *model.Incident
+	for _, inc := range st2.Incidents {
+		if inc.Fingerprint == "app-01/http" && inc.Epoch == 3 {
+			childInc3 = inc
+		}
+	}
+	subj1NotifsAfter := 0
+	for _, n := range st2.Notifications {
+		if childInc1 != nil && n.SubjectID == childInc1.ID {
+			subj1NotifsAfter++
+		}
+	}
+	freshIdentity := childInc3 != nil && childInc1 != nil && childInc2 != nil &&
+		childInc3.ID != childInc1.ID && childInc3.ID != childInc2.ID
+	pass(fmt.Sprintf("再次发生开立全新事件 -> %s，旧主体通知不增（%d 条不变）",
+		rj.Outcome, subj1Notifs),
+		rj.Outcome == correlator.OutcomeOpened && freshIdentity && subj1NotifsAfter == subj1Notifs)
 
 	// 已发出通知保留原始依据快照，事后不被改写。
 	basisOK := false

@@ -152,3 +152,104 @@ func TestStaleRecoveryDoesNotTouchNewCause(t *testing.T) {
 		t.Fatalf("new epoch cause must remain intact after stale recovery: %+v", v)
 	}
 }
+
+// 同一子事件的抑制、原因撤回与恢复通知必须共用同一主体身份（子事件 ID），
+// 原告警标识与指纹作为关联信息可查询；再次发生时新事件使用全新主体身份，
+// 不复用旧事件的判重身份，旧主体的通知不被新增。
+func TestUnifiedSubjectIdentityAcrossLifecycle(t *testing.T) {
+	eng, fire := multiSetup(t)
+	eng.Process(fire("d", "db/p", "db", 1))
+	eng.Process(fire("n", "net/p", "net", 1))
+	eng.Process(fire("a", "app/h", "app", 1, "db", "net"))
+	st := eng.Store()
+
+	var child1 *model.Incident
+	for _, inc := range st.Incidents {
+		if inc.Fingerprint == "app/h" && inc.Epoch == 1 {
+			child1 = inc
+		}
+	}
+	if child1 == nil {
+		t.Fatal("suppressed child incident must exist")
+	}
+	resolve := func(id, fp, src string) model.Alert {
+		return model.Alert{ID: id, Fingerprint: fp, Source: src, Check: "h",
+			Status: model.StatusResolved, Epoch: 1, StartsAt: time.Now()}
+	}
+	eng.Process(resolve("dr", "db/p", "db"))
+	eng.Process(resolve("nr", "net/p", "net"))
+
+	kinds := map[string]int{}
+	for _, n := range st.Notifications {
+		if n.Fingerprint != "app/h" {
+			continue
+		}
+		switch n.Kind {
+		case "alert_suppressed", "explanation_withdrawn", "alert_resumed":
+			if n.SubjectID != child1.ID {
+				t.Fatalf("%s must use child incident as subject, got %q want %q",
+					n.Kind, n.SubjectID, child1.ID)
+			}
+			if n.AlertID != "a" {
+				t.Fatalf("%s must keep origin alert id as relation, got %q", n.Kind, n.AlertID)
+			}
+			kinds[n.Kind]++
+		}
+	}
+	if kinds["alert_suppressed"] != 1 || kinds["explanation_withdrawn"] != 2 || kinds["alert_resumed"] != 1 {
+		t.Fatalf("lifecycle notifications incomplete: %v", kinds)
+	}
+	for _, n := range st.Notifications {
+		if n.Kind == "alert_resumed" && n.SubjectID == child1.ID {
+			parents := map[string]bool{}
+			for _, b := range n.Basis {
+				parents[b.ParentSource] = true
+			}
+			if !parents["db"] || !parents["net"] {
+				t.Fatalf("resumed basis must trace both causes, got %+v", n.Basis)
+			}
+		}
+	}
+
+	eng.Process(fire("d2", "db/p", "db", 2))
+	oldCount := 0
+	for _, n := range st.Notifications {
+		if n.SubjectID == child1.ID {
+			oldCount++
+		}
+	}
+	r, _ := eng.Process(fire("a2", "app/h", "app", 2, "db"))
+	if r.Outcome != correlator.OutcomeSuppressed {
+		t.Fatalf("recurrence must be suppressed again, got %s", r.Outcome)
+	}
+	var child2 *model.Incident
+	for _, inc := range st.Incidents {
+		if inc.Fingerprint == "app/h" && inc.Epoch == 2 {
+			child2 = inc
+		}
+	}
+	if child2 == nil || child2.ID == child1.ID {
+		t.Fatalf("recurrence must open a fresh incident identity, got %+v", child2)
+	}
+	newSuppressed := 0
+	for _, n := range st.Notifications {
+		if n.Kind == "alert_suppressed" && n.SubjectID == child2.ID {
+			newSuppressed++
+			if n.DedupKey == "alert_suppressed|"+child1.ID {
+				t.Fatalf("new event must not reuse old dedup identity: %q", n.DedupKey)
+			}
+		}
+	}
+	if newSuppressed != 1 {
+		t.Fatalf("recurrence must notify once under the new subject, got %d", newSuppressed)
+	}
+	stillOld := 0
+	for _, n := range st.Notifications {
+		if n.SubjectID == child1.ID {
+			stillOld++
+		}
+	}
+	if stillOld != oldCount {
+		t.Fatalf("old subject notifications must not grow: %d -> %d", oldCount, stillOld)
+	}
+}

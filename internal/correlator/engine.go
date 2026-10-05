@@ -321,9 +321,10 @@ func (e *Engine) absorbIncident(child, parent *model.Incident) error {
 	}
 	bases := e.basesFor(child.Fingerprint)
 	e.suppressDecision(child.ID, child.Fingerprint, bases)
+	e.bindSubject(child.Fingerprint, child.ID)
 	e.emitBasis("alert_suppressed", parent.ID,
 		fmt.Sprintf("parent %s absorbed child incident %s after evidence", parent.Source, child.ID),
-		child.ID, bases)
+		child.ID, firstAlertID(child.AlertIDs), child.Fingerprint, bases)
 	if err := e.store.SaveExplanations(); err != nil {
 		return err
 	}
@@ -389,9 +390,10 @@ func (e *Engine) forEachChildParent(parent *model.Incident) error {
 			}
 			bases := e.basesFor(child.Fingerprint)
 			e.suppressDecision(child.ID, child.Fingerprint, bases)
+			e.bindSubject(child.Fingerprint, child.ID)
 			e.emitBasis("alert_suppressed", parent.ID,
 				fmt.Sprintf("late parent %s absorbed child incident %s", parent.Source, child.ID),
-				child.ID, bases)
+				child.ID, firstAlertID(child.AlertIDs), child.Fingerprint, bases)
 		}
 	}
 	if err := e.store.SaveExplanations(); err != nil {
@@ -430,13 +432,17 @@ func (e *Engine) applySuppression(a model.Alert, parents map[string]bool) error 
 	}
 	bases := e.basesFor(a.Fingerprint)
 	e.suppressDecision(childInc.ID, a.Fingerprint, bases)
+	e.bindSubject(a.Fingerprint, childInc.ID)
+	if err := e.store.SaveExplanations(); err != nil {
+		return err
+	}
 	if err := e.store.SaveIncidents(); err != nil {
 		return err
 	}
 	// 抑制通知按主体只发一次：首个已确认原因出现时发出，后续原因补到不重复通知。
 	e.emitBasis("alert_suppressed", firstParentID(parents, e.store),
 		fmt.Sprintf("alert %s from %s suppressed by %d cause(s)", a.ID, a.Source, len(parents)),
-		a.ID, bases)
+		childInc.ID, a.ID, a.Fingerprint, bases)
 	return e.store.SaveSuppressions()
 }
 
@@ -489,27 +495,32 @@ func firstParentID(parents map[string]bool, st *store.Store) string {
 
 // emit 把通知写入本地记录（按 DedupKey 去重），仅新增时才交给 Notifier。
 func (e *Engine) emit(kind, incidentID, detail string) {
-	e.emitBasis(kind, incidentID, detail, "", nil)
+	e.emitBasis(kind, incidentID, detail, "", "", "", nil)
 }
 
 // emitBasis 写入一条带当时依据快照的通知，按身份（事件 ID + 主体）去重，
 // 绝不按文案判重：不同事件的同类通知各自保留，同一通知重复提交或
 // 存储重开后重放仍只记录一次。已发出的通知事后不改写其依据。
-func (e *Engine) emitBasis(kind, incidentID, detail, subjectID string, bases []model.Basis) {
-	// 面向主体的通知（抑制/恢复）按主体判重：同一主体被多个父事件
-	// 抑制只通知一次；其余通知按 (类型, 事件, 主体) 判重，与文案无关。
+// 面向主体的通知（抑制/原因撤回/恢复）在整个生命周期共用同一主体身份
+// （子事件 ID）；原告警 ID 与指纹作为关联信息随通知保存，供查询串联。
+func (e *Engine) emitBasis(kind, incidentID, detail, subjectID, alertID, fingerprint string, bases []model.Basis) {
+	// 面向主体的通知（抑制/恢复）按主体判重：同一子事件被多个父事件
+	// 抑制只通知一次；新事件（新轮次）有新的子事件 ID，不复用旧事件的
+	// 判重身份；其余通知按 (类型, 事件, 主体) 判重，与文案无关。
 	dedupKey := kind + "|" + incidentID + "|" + subjectID
 	if kind == "alert_suppressed" || kind == "alert_resumed" {
 		dedupKey = kind + "|" + subjectID
 	}
 	n := model.Notification{
-		Kind:       kind,
-		IncidentID: incidentID,
-		Detail:     detail,
-		DedupKey:   dedupKey,
-		SubjectID:  subjectID,
-		Basis:      bases,
-		At:         e.now(),
+		Kind:        kind,
+		IncidentID:  incidentID,
+		Detail:      detail,
+		DedupKey:    dedupKey,
+		SubjectID:   subjectID,
+		AlertID:     alertID,
+		Fingerprint: fingerprint,
+		Basis:       bases,
+		At:          e.now(),
 	}
 	added, err := e.store.AppendNotification(n)
 	if err != nil || !added {
@@ -554,7 +565,7 @@ func (e *Engine) reconcile() error {
 			e.emitBasis("explanation_withdrawn", x.ParentIncidentID,
 				fmt.Sprintf("cause %s (%s) of %s withdrawn: parent resolved",
 					x.ID, x.ParentSource, x.AlertFingerprint),
-				x.AlertFingerprint, nil)
+				e.subjectFor(x), firstAlertID(x.AlertIDs), x.AlertFingerprint, nil)
 		}
 	}
 	if err := e.store.SaveExplanations(); err != nil {
@@ -586,6 +597,10 @@ func (e *Engine) reconcile() error {
 			if inc := e.store.ActiveIncident(fp); inc != nil {
 				incidentID = inc.ID
 			}
+			alertID := ""
+			if inc := e.store.LatestIncident(fp); inc != nil {
+				alertID = firstAlertID(inc.AlertIDs)
+			}
 			if incidentID == "" {
 				// 子告警此前被抑制而未独立开活动事件：恢复通知仍关联
 				// 到被抑制的主体本身。
@@ -593,10 +608,36 @@ func (e *Engine) reconcile() error {
 			}
 			e.emitBasis("alert_resumed", incidentID,
 				fmt.Sprintf("all confirmed causes for %s cleared; notification resumed", subjectID),
-				subjectID, e.basesSnapshot(fp))
+				subjectID, alertID, fp, e.basesSnapshot(fp))
 		}
 	}
 	return e.store.SaveDecisions()
+}
+
+// bindSubject 把某子身份当前全部活动解释的主体统一绑定到子事件 ID，
+// 使抑制、原因撤回与恢复通知在整个生命周期共用同一主体身份。
+func (e *Engine) bindSubject(fp, incidentID string) {
+	for _, x := range e.store.Explanations {
+		if x.AlertFingerprint == fp && x.Active() {
+			x.SubjectID = incidentID
+		}
+	}
+}
+
+// subjectFor 返回一条解释当前所属的通知主体：优先采用决定状态中
+// 记录的子事件 ID，保证撤回通知与抑制/恢复通知主体一致。
+func (e *Engine) subjectFor(x *model.Explanation) string {
+	if d := e.store.DecisionForFP(x.AlertFingerprint); d != nil && d.SubjectID != "" {
+		return d.SubjectID
+	}
+	return x.SubjectID
+}
+
+func firstAlertID(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }
 
 // basesSnapshot 生成某子身份全部原因解释（含刚撤回的）的依据快照，
